@@ -2,7 +2,7 @@
 
 echo "=========================================="
 echo "COMPREHENSIVE CGROUP MEMORY TEST"
-echo "Kernel: $(/bin/busybox uname -r)"
+echo "Kernel: $(uname -r)"
 echo "=========================================="
 
 # Function to display test results
