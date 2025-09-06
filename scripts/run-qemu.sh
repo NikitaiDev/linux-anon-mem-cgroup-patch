@@ -40,6 +40,7 @@ chmod +x test-cgroup.sh
 
 # Create directory structure and symlinks
 mkdir -p bin sbin usr/bin usr/sbin
+rm -f bin/sh bin/ash bin/mount bin/echo bin/cat bin/ls bin/mkdir bin/uname bin/sleep
 ln -s /busybox bin/sh
 ln -s /busybox bin/ash
 ln -s /busybox bin/mount
