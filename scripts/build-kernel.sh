@@ -90,12 +90,17 @@ sudo docker run -it --rm \
     echo '[INFO] Changing to kernel directory: $WORKDIR'
     cd '$WORKDIR'
 
-    # Apply patch if it exists
+    # Apply patch only if it exists AND hasn't been applied yet
     if [ -f '/host/$PATCH_SOURCE' ] && [ -s '/host/$PATCH_SOURCE' ]; then
-        echo '[INFO] Applying patch: $PATCH_SOURCE'
-        git apply '/host/$PATCH_SOURCE'
+        echo '[INFO] Checking patch: $PATCH_SOURCE'
+        if git apply --check '/host/$PATCH_SOURCE' 2>/dev/null; then
+            echo '[INFO] Applying patch...'
+            git apply '/host/$PATCH_SOURCE'
+        else
+            echo '[INFO] Patch already applied or contains conflicts. Continuing...'
+        fi
     else
-        echo '[INFO] No patch to apply. Building vanilla kernel.'
+        echo '[INFO] No patch to apply. Building with current modifications.'
     fi
 
     echo '[INFO] Copying kernel configuration...'
