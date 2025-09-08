@@ -21,8 +21,27 @@ index 20ff87f8e..393b90ebc 100644
  /**
   * mem_cgroup_charge - Charge a newly allocated folio to a cgroup.
   * @folio: Folio to charge.
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index ed1581b67..39d1194f4 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -6225,6 +6225,14 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
+ 				ret = VM_FAULT_OOM;
+ 				goto backout_unlocked;
+ 			}
++			if (vma->vm_mm) {
++				struct mem_cgroup *memcg = get_mem_cgroup_from_mm(vma->vm_mm);
++
++				if (memcg) {
++					mem_cgroup_charge_anon_folio(folio, memcg);
++					mem_cgroup_put(memcg);
++				}
++			}
+ 			anon_rmap = 1;
+ 		}
+ 	} else {
 diff --git a/mm/memcontrol.c b/mm/memcontrol.c
-index 61932c921..8938968cb 100644
+index 61932c921..e99449cca 100644
 --- a/mm/memcontrol.c
 +++ b/mm/memcontrol.c
 @@ -210,6 +210,7 @@ enum res_type {
@@ -52,7 +71,7 @@ index 61932c921..8938968cb 100644
 +	int ret;
 +
 +	mutex_lock(&memcg_max_mutex);
-+	page_counter_set_max(&memcg->anonmem, max);
++	ret = page_counter_set_max(&memcg->anonmem, max);
 +	mutex_unlock(&memcg_max_mutex);
 +
 +	return ret;
