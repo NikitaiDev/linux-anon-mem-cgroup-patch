@@ -1,18 +1,28 @@
 diff --git a/include/linux/memcontrol.h b/include/linux/memcontrol.h
-index 20ff87f8e..97cbf3a35 100644
+index 20ff87f8e..393b90ebc 100644
 --- a/include/linux/memcontrol.h
 +++ b/include/linux/memcontrol.h
-@@ -210,6 +210,8 @@ struct mem_cgroup {
+@@ -210,6 +210,9 @@ struct mem_cgroup {
  		struct page_counter memsw;	/* v1 only */
  	};
  
 +	struct page_counter anonmem;	/* v1 only */
++	spinlock_t anon_lock;			/* v1 only */
 +	
  	/* Legacy consumer-oriented counters */
  	struct page_counter kmem;		/* v1 only */
  	struct page_counter tcpmem;		/* v1 only */
+@@ -667,7 +670,7 @@ static inline bool mem_cgroup_below_min(struct mem_cgroup *target,
+ void mem_cgroup_commit_charge(struct folio *folio, struct mem_cgroup *memcg);
+ 
+ int __mem_cgroup_charge(struct folio *folio, struct mm_struct *mm, gfp_t gfp);
+-
++void mem_cgroup_charge_anon_folio(struct folio *folio, struct mem_cgroup *memcg);
+ /**
+  * mem_cgroup_charge - Charge a newly allocated folio to a cgroup.
+  * @folio: Folio to charge.
 diff --git a/mm/memcontrol.c b/mm/memcontrol.c
-index 61932c921..b9073ec03 100644
+index 61932c921..8938968cb 100644
 --- a/mm/memcontrol.c
 +++ b/mm/memcontrol.c
 @@ -210,6 +210,7 @@ enum res_type {
@@ -33,17 +43,35 @@ index 61932c921..b9073ec03 100644
  	default:
  		BUG();
  	}
-@@ -4075,6 +4079,9 @@ static ssize_t mem_cgroup_write(struct kernfs_open_file *of,
+@@ -4001,6 +4005,17 @@ static void memcg_offline_kmem(struct mem_cgroup *memcg)
+ }
+ #endif /* CONFIG_MEMCG_KMEM */
+ 
++static int memcg_update_anon_max(struct mem_cgroup *memcg, unsigned long max)
++{
++	int ret;
++
++	mutex_lock(&memcg_max_mutex);
++	page_counter_set_max(&memcg->anonmem, max);
++	mutex_unlock(&memcg_max_mutex);
++
++	return ret;
++}
++
+ static int memcg_update_tcp_max(struct mem_cgroup *memcg, unsigned long max)
+ {
+ 	int ret;
+@@ -4075,6 +4090,9 @@ static ssize_t mem_cgroup_write(struct kernfs_open_file *of,
  		case _TCP:
  			ret = memcg_update_tcp_max(memcg, nr_pages);
  			break;
 +		case _ANON:
-+			ret = -EINVAL;
++			ret = memcg_update_anon_max(memcg, nr_pages);
 +			break;
  		}
  		break;
  	case RES_SOFT_LIMIT:
-@@ -4108,6 +4115,9 @@ static ssize_t mem_cgroup_reset(struct kernfs_open_file *of, char *buf,
+@@ -4108,6 +4126,9 @@ static ssize_t mem_cgroup_reset(struct kernfs_open_file *of, char *buf,
  	case _TCP:
  		counter = &memcg->tcpmem;
  		break;
@@ -53,7 +81,7 @@ index 61932c921..b9073ec03 100644
  	default:
  		BUG();
  	}
-@@ -5210,6 +5220,17 @@ static int mem_cgroup_slab_show(struct seq_file *m, void *p)
+@@ -5210,6 +5231,17 @@ static int mem_cgroup_slab_show(struct seq_file *m, void *p)
  static int memory_stat_show(struct seq_file *m, void *v);
  
  static struct cftype mem_cgroup_legacy_files[] = {
@@ -71,7 +99,7 @@ index 61932c921..b9073ec03 100644
  	{
  		.name = "usage_in_bytes",
  		.private = MEMFILE_PRIVATE(_MEM, RES_USAGE),
-@@ -5584,12 +5605,14 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
+@@ -5584,12 +5616,14 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
  		page_counter_init(&memcg->swap, &parent->swap);
  		page_counter_init(&memcg->kmem, &parent->kmem);
  		page_counter_init(&memcg->tcpmem, &parent->tcpmem);
@@ -86,7 +114,7 @@ index 61932c921..b9073ec03 100644
  
  		root_mem_cgroup = memcg;
  		return &memcg->css;
-@@ -5738,6 +5761,7 @@ static void mem_cgroup_css_reset(struct cgroup_subsys_state *css)
+@@ -5738,6 +5772,7 @@ static void mem_cgroup_css_reset(struct cgroup_subsys_state *css)
  	page_counter_set_max(&memcg->swap, PAGE_COUNTER_MAX);
  	page_counter_set_max(&memcg->kmem, PAGE_COUNTER_MAX);
  	page_counter_set_max(&memcg->tcpmem, PAGE_COUNTER_MAX);
@@ -94,3 +122,57 @@ index 61932c921..b9073ec03 100644
  	page_counter_set_min(&memcg->memory, 0);
  	page_counter_set_low(&memcg->memory, 0);
  	page_counter_set_high(&memcg->memory, PAGE_COUNTER_MAX);
+@@ -7294,6 +7329,33 @@ int __mem_cgroup_charge(struct folio *folio, struct mm_struct *mm, gfp_t gfp)
+ 	return ret;
+ }
+ 
++/**
++ * mem_cgroup_charge_anon_folio - Charge anonymous memory to memcg
++ * @folio: folio to charge
++ * @memcg: memory cgroup
++ *
++ * Charges anonymous memory to the memory cgroup. Should be called
++ * after allocating anonymous folio but before adding it to page tables.
++ */
++void mem_cgroup_charge_anon_folio(struct folio *folio, struct mem_cgroup *memcg)
++{
++    unsigned int nr_pages;
++    
++    if (!memcg || !folio)
++        return;
++    
++    nr_pages = folio_nr_pages(folio);
++    
++    /* Set folio->memcg_data connection */
++    folio->memcg_data = (unsigned long)memcg | MEMCG_DATA_OBJCGS;
++    
++    /* Charge the memory to cgroup */
++    spin_lock(&memcg->anon_lock);
++    page_counter_charge(&memcg->anonmem, nr_pages);
++    spin_unlock(&memcg->anon_lock);
++}
++EXPORT_SYMBOL_GPL(mem_cgroup_charge_anon_folio);
++
+ /**
+  * mem_cgroup_hugetlb_try_charge - try to charge the memcg for a hugetlb folio
+  * @memcg: memcg to charge.
+diff --git a/mm/memory.c b/mm/memory.c
+index 0bfc8b007..35124a6f5 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -4302,6 +4302,15 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
+ 		goto oom_free_page;
+ 	folio_throttle_swaprate(folio, GFP_KERNEL);
+ 
++    if (vma->vm_mm) {
++		struct mem_cgroup *memcg = get_mem_cgroup_from_mm(vma->vm_mm);
++
++		if (memcg) {
++			mem_cgroup_charge_anon_folio(folio, memcg);
++			mem_cgroup_put(memcg);
++		}
++    }
++
+ 	/*
+ 	 * The memory barrier inside __folio_mark_uptodate makes sure that
+ 	 * preceding stores to the page contents become visible before
